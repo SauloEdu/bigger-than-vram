@@ -8,4 +8,6 @@ aliases: [PROGRESSO]
   scripts de medição, teste do mapa quente, CI de referência para a central local, roteiro de vídeo.
 - Números do README conferidos com os registros de medida da sessão original (`medidas.jsonl`, fora do repo).
 - Repositório público desde 2026-11-25 ([[PEN-PUB-001]] feita).
+- README (inglês e português) redesenhado: selos com os números medidos, resumo "antes/depois", diagrama e
+  gráfico em Mermaid (conferidos renderizando no GitHub), detalhes das técnicas em blocos recolhíveis.
 - Falta: gravação e edição do vídeo.
