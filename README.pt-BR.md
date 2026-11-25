@@ -123,7 +123,7 @@ um modelo de voz, um processo que mantém o PC usável (com o atraso medido) e s
 
 Feito por **[Saulo Eduardo](https://github.com/SauloEdu)**, Beexbe Tecnologia e Inovação.
 Se você roda modelos grandes em máquina comum ou quer ajuda num projeto assim, abra uma
-[issue](https://github.com/SauloEdu/bigger-than-vram/issues) ou entre em contato.
+[issue](https://github.com/SauloEdu/bigger-than-vram/issues) ou fale comigo no [LinkedIn](https://www.linkedin.com/in/sauloeduardo-beexbe).
 
 ## Licenças
 

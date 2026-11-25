@@ -316,7 +316,7 @@ administrator rights.
 
 Made by **[Saulo Eduardo](https://github.com/SauloEdu)**, Beexbe Tecnologia e Inovação.
 If you run big models on ordinary hardware, or want help with a project like this, open an
-[issue](https://github.com/SauloEdu/bigger-than-vram/issues) or get in touch.
+[issue](https://github.com/SauloEdu/bigger-than-vram/issues) or get in touch on [LinkedIn](https://www.linkedin.com/in/sauloeduardo-beexbe).
 
 ## Licenses and credits
 
