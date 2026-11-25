@@ -33,10 +33,12 @@ computer stays in normal use.
 | **8 bits** (38 GB) · one 6.2 s line, wall time | 12 min 05 s | **2 min 25 s** | **5.0× faster**¹ |
 | **16 bits** (68 GB) · one 5.8 s line, wall time | 17 min 18 s | **5 min 02 s** | **3.4× faster** |
 | **8 bits**, 6 takes at once | 116.5× real time | **15.2× real time** | **7.7× faster** |
-| Worst system lag while generating | — | **7 ms** max, 0 over 50 ms | PC stays usable |
+| Worst system lag while generating, in every run reported below² | — | **7 ms** max, 0 over 50 ms | PC stays usable |
 
 <sub>¹ Final build, single take (23.2× real time). In the step-by-step series below the same configuration
-measured 26.5× real time (4.4×). One run each, so the gap mixes the final build and run-to-run variation.</sub>
+measured 26.5× real time (4.4×). One run each, so the gap mixes the final build and run-to-run variation.<br>
+² One earlier 8-bit baseline run, without the method, was replaced by the baseline shown below and is not in the
+results. It reached 399 ms max lag.</sub>
 
 > [!NOTE]
 > Every number comes from a logged run (one JSON line per run), with a cold OS file cache. One machine, one
@@ -198,7 +200,10 @@ all = both prefetches + 4 read threads · batch = that plus N takes in lockstep.
 | | p50 | p99 | max | delays > 50 ms |
 |---|--:|--:|--:|--:|
 | before generating | 0.43 ms | 0.65 ms | 0.9 ms | 0 |
-| during every measured run | — | 0.67–0.69 ms | 1.3–7 ms | **0** |
+| during every run reported above | — | 0.67–0.69 ms | 1.3–7 ms | **0** |
+
+One earlier 8-bit baseline run, without the method, was replaced by the baseline in the table above and is not
+counted here. It reached 399 ms max lag.
 
 CPU use of the generator: 2–17%. With the 4 GB cap, available RAM never went below 2.5 GB.
 

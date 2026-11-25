@@ -33,10 +33,12 @@ normal durante a geração.
 | **8 bits** (38 GB) · fala de 6,2 s, tempo de parede | 12 min 05 s | **2 min 25 s** | **5,0× mais rápido**¹ |
 | **16 bits** (68 GB) · fala de 5,8 s, tempo de parede | 17 min 18 s | **5 min 02 s** | **3,4× mais rápido** |
 | **8 bits**, 6 tomadas de uma vez | 116,5× o tempo real | **15,2× o tempo real** | **7,7× mais rápido** |
-| Pior atraso do sistema durante a geração | — | **7 ms** no máximo, nenhum acima de 50 ms | PC continua usável |
+| Pior atraso do sistema durante a geração, em todas as rodadas relatadas² | — | **7 ms** no máximo, nenhum acima de 50 ms | PC continua usável |
 
 <sub>¹ Build final, uma tomada (23,2× o tempo real). Na série passo a passo a mesma configuração mediu 26,5× o
-tempo real (4,4×). Uma medida de cada, então a diferença mistura o build final e a variação entre rodadas.</sub>
+tempo real (4,4×). Uma medida de cada, então a diferença mistura o build final e a variação entre rodadas.<br>
+² Uma rodada anterior da referência em 8 bits, sem o método, foi substituída pela referência relatada e não entra
+nos resultados. Ela chegou a 399 ms de atraso máximo.</sub>
 
 > [!NOTE]
 > Todo número vem de uma rodada registrada (uma linha JSON por rodada), com o cache de arquivos do sistema frio.

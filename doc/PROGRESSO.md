@@ -13,4 +13,6 @@ aliases: [PROGRESSO]
 - Nome trocado de moe-offload-desktop para **bigger-than-vram** (escolha do Saulo entre opções do Copywriter
   Sexy Canvas: a frase que o público já digita quando o modelo não cabe). GitHub redireciona o link antigo;
   pasta local, central de CI e gancho atualizados; descrição e tópicos do repositório preenchidos.
+- README (EN e PT): a frase do atraso máximo (7 ms) passou a dizer que vale para as rodadas relatadas. Uma rodada
+  anterior da referência em 8 bits, sem o método e substituída, chegou a 399 ms (`q8-l1-base` em `medidas.jsonl`).
 - Falta: gravação e edição do vídeo.
