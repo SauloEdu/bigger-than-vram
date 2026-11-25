@@ -15,4 +15,7 @@ aliases: [PROGRESSO]
   pasta local, central de CI e gancho atualizados; descrição e tópicos do repositório preenchidos.
 - README (EN e PT): a frase do atraso máximo (7 ms) passou a dizer que vale para as rodadas relatadas. Uma rodada
   anterior da referência em 8 bits, sem o método e substituída, chegou a 399 ms (`q8-l1-base` em `medidas.jsonl`).
-- Falta: gravação e edição do vídeo.
+- Revisão do dono aplicada no README (EN e PT): ganho de uma tomada unificado em 4,4× (mesma série da referência;
+  2 min 25 s vira "melhor rodada"), lote explicado como tomadas da mesma frase, seção de trabalhos relacionados
+  e seção de autoria ([[DEC-PUB-001]] atualizada). Repetir as medidas ficou em [[PEN-MED-001]].
+- Falta: gravação e edição do vídeo; [[PEN-MED-001]].

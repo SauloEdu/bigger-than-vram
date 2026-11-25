@@ -13,7 +13,7 @@ sem travar o resto do computador.**
 [![Sem pesos no repositório](https://img.shields.io/badge/pesos-n%C3%A3o%20inclu%C3%ADdos-lightgrey)](#licenças)
 
 [![Ganho: 4,4x uma tomada](https://img.shields.io/badge/ganho-4%2C4%C3%97%20uma%20tomada-success)](#o-que-funcionou)
-[![Ganho: 7,7x lote de 6](https://img.shields.io/badge/ganho-7%2C7%C3%97%20lote%20de%206-success)](#o-que-funcionou)
+[![Ganho: 7,7x em 6 tomadas da mesma frase](https://img.shields.io/badge/ganho-7%2C7%C3%97%206%20tomadas%20da%20mesma%20frase-success)](#o-que-funcionou)
 [![Disco: 144 para 534 MB/s](https://img.shields.io/badge/disco-144%20%E2%86%92%20534%20MB%2Fs-informational)](#o-que-funcionou)
 [![Atraso p99 abaixo de 0,7 ms](https://img.shields.io/badge/atraso%20do%20PC%20p99-%3C0%2C7%20ms-brightgreen)](#o-que-funcionou)
 
@@ -30,14 +30,16 @@ normal durante a geração.
 
 | | Antes | Depois | Ganho |
 |---|:---:|:---:|:---:|
-| **8 bits** (38 GB) · fala de 6,2 s, tempo de parede | 12 min 05 s | **2 min 25 s** | **5,0× mais rápido**¹ |
+| **8 bits** (38 GB) · fala de 6,2 s, tempo de parede | 12 min 05 s | **2 min 45 s**¹ | **4,4× mais rápido** |
 | **16 bits** (68 GB) · fala de 5,8 s, tempo de parede | 17 min 18 s | **5 min 02 s** | **3,4× mais rápido** |
-| **8 bits**, 6 tomadas de uma vez | 116,5× o tempo real | **15,2× o tempo real** | **7,7× mais rápido** |
-| Pior atraso do sistema durante a geração, em todas as rodadas relatadas² | — | **7 ms** no máximo, nenhum acima de 50 ms | PC continua usável |
+| **8 bits**, 6 tomadas da *mesma* frase de uma vez² | 116,5× o tempo real | **15,2× o tempo real** | **7,7× mais rápido** |
+| Pior atraso do sistema durante a geração, em todas as rodadas relatadas³ | — | **7 ms** no máximo, nenhum acima de 50 ms | PC continua usável |
 
-<sub>¹ Build final, uma tomada (23,2× o tempo real). Na série passo a passo a mesma configuração mediu 26,5× o
-tempo real (4,4×). Uma medida de cada, então a diferença mistura o build final e a variação entre rodadas.<br>
-² Uma rodada anterior da referência em 8 bits, sem o método, foi substituída pela referência relatada e não entra
+<sub>¹ Mesma série e mesmas condições da referência. Melhor rodada: **2 min 25 s** (build final, 23,2× o tempo
+real), uma medida só, então a diferença mistura o build final e a variação entre rodadas.<br>
+² O lote gera várias tomadas (sementes diferentes) de uma frase só, e todas terminam juntas. Para frases
+diferentes, como um roteiro de narração, o ganho é o de uma tomada: 4,4× em 8 bits e 3,4× em 16 bits.<br>
+³ Uma rodada anterior da referência em 8 bits, sem o método, foi substituída pela referência relatada e não entra
 nos resultados. Ela chegou a 399 ms de atraso máximo.</sub>
 
 > [!NOTE]
@@ -77,7 +79,7 @@ flowchart LR
 | # | Técnica | Ganho medido | O que faz |
 |:-:|---|:---:|---|
 | 1 | **Pré-busca** | **4,4×** em 8 bits · **3,4×** em 16 bits | Pede ao sistema todos os especialistas da camada de uma vez e lê a próxima camada em segundo plano; com 4 threads de cópia, o disco foi de 144 para 534 MB/s |
-| 2 | **Lote** | **1,56×** (3 tomadas) · **1,82×** (6) | Várias tomadas em passo travado dividem cada leitura; o estado de cada uma fica na VRAM. 8 bits chega a 15,2× o tempo real |
+| 2 | **Lote** | **1,56×** (3 tomadas) · **1,82×** (6) | Várias tomadas da mesma frase, em passo travado, dividem cada leitura; o estado de cada uma fica na VRAM. 8 bits chega a 15,2× o tempo real |
 | 3 | **Mapa de especialistas quentes** | +4% | Fixa os mais usados na VRAM e pré-lê os seguintes na RAM (o roteador deste modelo espalha os pedidos) |
 | 4 | **Processo educado** | custa ~4% | Prioridades baixas e teto de 4 GB de RAM; atraso p99 de 0,7 ms, máximo 7 ms, nenhum acima de 50 ms |
 | 5 | Compressão sem perda tipo DFloat11 | não se aplica | Sem kernel no ggml; o original já é FP8 |
@@ -92,10 +94,36 @@ para qualquer MoE em GGUF, no [METHOD.md](METHOD.md).
 
 - Uma máquina, um modelo, uma frase curta, **uma medida por configuração** (diferença abaixo de ~5% é ruído).
 - Cache de arquivos frio; gerações seguidas são mais rápidas.
-- Lote só para tomadas da mesma frase.
+- Lote só para tomadas da mesma frase. Frases diferentes num lote precisariam de um prefill por frase; não
+  implementado.
 - Scripts de medição só no Windows.
 - Continua lento em termos absolutos: a graça é rodar um modelo deste tamanho numa placa de 16 GB sem largar o
   computador.
+
+## Trabalhos relacionados
+
+Nenhuma ideia daqui é nova sozinha. O repositório é uma combinação testada, com números, a máquina e como
+repetir.
+
+- **llama.cpp `--override-tensor`** (`-ot`): deixa tensores escolhidos, em geral os especialistas, na RAM e
+  calcula na CPU. Funciona quando os especialistas cabem na RAM; aqui nem na RAM livre cabem, então ficam no SSD e
+  são calculados na GPU depois de lidos para um cache na VRAM.
+- **[KTransformers](https://github.com/kvcache-ai/ktransformers)**: inferência híbrida CPU/GPU para LLMs MoE
+  grandes, com os especialistas na CPU. Pressupõe muita RAM.
+- **[PowerInfer](https://arxiv.org/abs/2312.12456)** (Song et al., 2023): neurônios mais ativados na GPU e o resto
+  na CPU. O mapa de especialistas quentes é a mesma ideia no nível do especialista inteiro.
+- **[LLM in a Flash](https://arxiv.org/abs/2312.11514)** (Alizadeh et al., Apple, 2023): lê pesos do
+  armazenamento sob demanda, para aparelhos com pouca memória. É o mais parecido com este trabalho.
+- **FlexGen** (Sheng et al., 2023): a ideia do lote.
+
+O que muda aqui: um patch pequeno no [audio.cpp](https://github.com/0xShug0/audio.cpp) em vez de um motor novo,
+um modelo de voz, um processo que mantém o PC usável (com o atraso medido) e sem precisar de administrador.
+
+## Autor
+
+Feito por **[Saulo Eduardo](https://github.com/SauloEdu)**, Beexbe Tecnologia e Inovação.
+Se você roda modelos grandes em máquina comum ou quer ajuda num projeto assim, abra uma
+[issue](https://github.com/SauloEdu/bigger-than-vram/issues) ou entre em contato.
 
 ## Licenças
 

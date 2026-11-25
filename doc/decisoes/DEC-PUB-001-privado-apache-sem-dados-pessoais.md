@@ -17,3 +17,8 @@ teste com marca. O CI barra `.gguf/.wav/...` e caminhos de pasta de usuário (Wi
 **Descartado:** MIT (funcionaria, mas Apache mantém a mesma regra do código de origem); publicar os scripts de
 avaliação de voz (dependem de ferramentas internas).
 **Consequências:** os scripts de medição saem como estão (testados), com flags em português documentadas no README.
+
+**Atualização (2026-11-25, revisão do dono):** a ideia não é anonimato; o projeto entra no portfólio. O README
+(EN e PT) ganhou a seção de autoria com nome do autor e da empresa e convite para contato. Continuam fora: pesos,
+áudios, caminhos pessoais, e-mail pessoal (commits seguem com o *noreply*). O CI segue desligado no GitHub
+(roda na central local), então o README não leva selo de "build passing".

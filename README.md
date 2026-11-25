@@ -13,7 +13,7 @@ on an ordinary desktop, without freezing the rest of the PC.**
 [![No weights included](https://img.shields.io/badge/weights-not%20included-lightgrey)](#licenses-and-credits)
 
 [![Speed-up: 4.4x single take](https://img.shields.io/badge/speed--up-4.4%C3%97%20single%20take-success)](#results)
-[![Speed-up: 7.7x batch of 6](https://img.shields.io/badge/speed--up-7.7%C3%97%20batch%20of%206-success)](#results)
+[![Speed-up: 7.7x for 6 takes of the same line](https://img.shields.io/badge/speed--up-7.7%C3%97%206%20takes%20of%20the%20same%20line-success)](#results)
 [![Disk: 144 to 534 MB/s](https://img.shields.io/badge/disk-144%20%E2%86%92%20534%20MB%2Fs-informational)](#results)
 [![Lag p99: under 0.7 ms](https://img.shields.io/badge/desktop%20lag%20p99-%3C0.7%20ms-brightgreen)](#did-the-pc-freeze)
 
@@ -30,14 +30,16 @@ computer stays in normal use.
 
 | | Before | After | Gain |
 |---|:---:|:---:|:---:|
-| **8 bits** (38 GB) · one 6.2 s line, wall time | 12 min 05 s | **2 min 25 s** | **5.0× faster**¹ |
+| **8 bits** (38 GB) · one 6.2 s line, wall time | 12 min 05 s | **2 min 45 s**¹ | **4.4× faster** |
 | **16 bits** (68 GB) · one 5.8 s line, wall time | 17 min 18 s | **5 min 02 s** | **3.4× faster** |
-| **8 bits**, 6 takes at once | 116.5× real time | **15.2× real time** | **7.7× faster** |
-| Worst system lag while generating, in every run reported below² | — | **7 ms** max, 0 over 50 ms | PC stays usable |
+| **8 bits**, 6 takes of the *same* line at once² | 116.5× real time | **15.2× real time** | **7.7× faster** |
+| Worst system lag while generating, in every run reported below³ | — | **7 ms** max, 0 over 50 ms | PC stays usable |
 
-<sub>¹ Final build, single take (23.2× real time). In the step-by-step series below the same configuration
-measured 26.5× real time (4.4×). One run each, so the gap mixes the final build and run-to-run variation.<br>
-² One earlier 8-bit baseline run, without the method, was replaced by the baseline shown below and is not in the
+<sub>¹ Same series and conditions as the baseline. Best run: **2 min 25 s** (final build, 23.2× real time), one
+run, so the gap mixes the final build and run-to-run variation.<br>
+² Batching generates several takes (different seeds) of one sentence and they all finish together. For different
+sentences, such as a narration script, the gain is the single-take one: 4.4× at 8 bits, 3.4× at 16 bits.<br>
+³ One earlier 8-bit baseline run, without the method, was replaced by the baseline shown below and is not in the
 results. It reached 399 ms max lag.</sub>
 
 > [!NOTE]
@@ -52,6 +54,8 @@ results. It reached 399 ms max lag.</sub>
 - [Results](#results)
 - [How to reproduce](#how-to-reproduce)
 - [Limits](#limits)
+- [Related work](#related-work)
+- [Author](#author)
 - [Licenses and credits](#licenses-and-credits)
 
 ## The problem
@@ -94,7 +98,7 @@ flowchart LR
 | # | Technique | Measured gain | What it does |
 |:-:|---|:---:|---|
 | 1 | **Prefetch** | **~4.4×** | Ask the OS for all missing experts of a layer in one call, and for the next layer in the background |
-| 2 | **Batching** | **1.56×** (3 takes) · **1.82×** (6) | N sequences share every expert read; their state stays in VRAM |
+| 2 | **Batching** | **1.56×** (3 takes) · **1.82×** (6) | N takes of the same sentence share every expert read; their state stays in VRAM |
 | 3 | **Hot-expert map** | +4% | Pin the most used experts in VRAM, pre-read the next ones into RAM |
 | 4 | **Polite process** | costs ~4% | Low priorities and hard memory caps, so the desktop stays responsive |
 | 5 | Lossless compression (DFloat11-style) | not applicable | No decompression kernel in ggml; the checkpoint is already FP8 |
@@ -181,7 +185,9 @@ all = both prefetches + 4 read threads · batch = that plus N takes in lockstep.
 | batch of 3 takes | **17.7** | **6.58×** | 9.9 GB | 573 MB/s |
 | batch of 6 takes | **15.2** | **7.66×** | 10.3 GB | 561 MB/s |
 
-⏱️ Wall time for one 6.2 s line: **12 min 05 s → 2 min 25 s** (final build, single take).
+⏱️ Wall time for one 6.2 s line: **12 min 05 s → 2 min 45 s** (same series, 4.4×). Best run: **2 min 25 s**
+(final build, single take).<br>
+⏱️ Batch of 6 takes of that line: **9 min 18 s** in total, all six finishing together.
 
 ### 16 bits (F16, 68 GB), GPU cache of 12 experts per layer (to fit ~10.5 GB)
 
@@ -191,7 +197,8 @@ all = both prefetches + 4 read threads · batch = that plus N takes in lockstep.
 | prefetch + 4 read threads + 4 GB RAM cap | **52.4** | **3.44×** | 10.3 GB | 688 MB/s |
 | same, batch of 3 (cache 10) | **43.2** | **4.17×** | 10.4 GB | 632 MB/s |
 
-⏱️ Wall time for one 5.8 s line: **17 min 18 s → 5 min 02 s**.
+⏱️ Wall time for one 5.8 s line: **17 min 18 s → 5 min 02 s**. Batch of 3 takes of that line: **12 min 38 s**
+in total.
 
 ### Did the PC freeze?
 
@@ -282,8 +289,34 @@ and run again with `--hotmap hotmap.csv --warm-mb 3072`.
 - The hot map was recorded on the test sentence itself; a production map should come from many sentences.
 - The measuring scripts are Windows-only (Job Objects, `SetProcessWorkingSetSizeEx`). The prefetch in the patch
   has a Linux path (`madvise`), but it was only measured on Windows.
-- Still slow in absolute terms (2.5 minutes for 6 seconds of speech at 8 bits). The point is that a model this
-  size runs at all on a 16 GB card while you keep using the computer.
+- Still slow in absolute terms (2 min 25 s to 2 min 45 s for 6 seconds of speech at 8 bits). The point is that a
+  model this size runs at all on a 16 GB card while you keep using the computer.
+
+## Related work
+
+None of the ideas here is new on its own. This repository is a tested combination, with numbers, the machine and
+how to repeat it.
+
+- **llama.cpp `--override-tensor`** (`-ot`): keeps chosen tensors, usually the MoE experts, in system RAM and runs
+  them on the CPU while the rest stays on the GPU. It works when the experts fit in RAM. Here they do not fit in
+  the free RAM either, so they stay on the SSD and are computed on the GPU after being streamed into a VRAM cache.
+- **[KTransformers](https://github.com/kvcache-ai/ktransformers)**: CPU/GPU hybrid inference for large MoE LLMs,
+  with the experts computed on the CPU. It assumes a machine with a lot of system RAM.
+- **[PowerInfer](https://arxiv.org/abs/2312.12456)** (Song et al., 2023): keeps frequently activated ("hot")
+  neurons on the GPU and the rest on the CPU. The hot map here is the same idea at the level of whole experts.
+- **[LLM in a Flash](https://arxiv.org/abs/2312.11514)** (Alizadeh et al., Apple, 2023): reads weights from flash
+  storage on demand, for devices with little DRAM. Closest in spirit to this work.
+- **FlexGen** (Sheng et al., 2023): the batching idea, credited below.
+
+What is different here: a small patch to [audio.cpp](https://github.com/0xShug0/audio.cpp) instead of a new
+engine, a text-to-speech model, a process that keeps the desktop responsive (with the lag measured), and no
+administrator rights.
+
+## Author
+
+Made by **[Saulo Eduardo](https://github.com/SauloEdu)**, Beexbe Tecnologia e Inovação.
+If you run big models on ordinary hardware, or want help with a project like this, open an
+[issue](https://github.com/SauloEdu/bigger-than-vram/issues) or get in touch.
 
 ## Licenses and credits
 
