@@ -1,6 +1,6 @@
 <div align="center">
 
-# moe-offload-desktop
+# bigger-than-vram
 
 **Rodar um modelo *mixture of experts* maior que a VRAM *e* que a RAM livre num PC comum,<br>
 sem travar o resto do computador.**

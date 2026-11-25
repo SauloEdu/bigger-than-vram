@@ -1,6 +1,6 @@
 <div align="center">
 
-# moe-offload-desktop
+# bigger-than-vram
 
 **Run a mixture-of-experts model that is bigger than your VRAM *and* your free RAM,<br>
 on an ordinary desktop, without freezing the rest of the PC.**
@@ -220,7 +220,7 @@ What changes consistently is cost: 16 bits reads 2.4× more expert bytes per sec
 ```sh
 git clone --branch v0.9.6 https://github.com/0xShug0/audio.cpp
 cd audio.cpp
-git apply ../moe-offload-desktop/patches/audio.cpp-v0.9.6-moe-offload.patch
+git apply ../bigger-than-vram/patches/audio.cpp-v0.9.6-moe-offload.patch
 ```
 
 Then build it with CUDA following audio.cpp's own instructions.

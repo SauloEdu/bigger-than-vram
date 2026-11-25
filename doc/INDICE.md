@@ -1,4 +1,4 @@
-# moe-offload-desktop — índice
+# bigger-than-vram — índice
 Atualizado: 2026-11-25 · Stack: patch C++ para o audio.cpp v0.9.6 + scripts Python/PowerShell (Windows) ·
 [[VISAO]] · [[ARQUITETURA]] · [[PROGRESSO]]
 
