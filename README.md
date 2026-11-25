@@ -82,9 +82,9 @@ does not notice.
 
 ```mermaid
 flowchart LR
-    SSD["💾 NVMe SSD<br/>full model<br/>38 / 68 GB"] -->|"prefetch:<br/>one big request<br/>per layer"| RAM["🧠 OS file cache<br/>(RAM the OS can reclaim)<br/>pre-read warm experts"]
-    RAM -->|"4 copy threads"| VRAM["🎮 GPU expert cache<br/>+ hot experts pinned<br/>~10.5 GB"]
-    VRAM --> GPU["⚡ compute<br/>N takes in lockstep<br/>share each read"]
+    SSD["💾 NVMe SSD<br/>whole model, 38/68 GB"] -->|prefetch| RAM["🧠 OS file cache<br/>warm experts"]
+    RAM -->|4 threads| VRAM["🎮 GPU cache<br/>hot experts, ~10.5 GB"]
+    VRAM --> GPU["⚡ N takes<br/>share each read"]
 ```
 
 ## Techniques
@@ -157,10 +157,13 @@ Cold OS file cache before every run (14 GB of another file read first). `× real
 ```mermaid
 xychart-beta
     title "8 bits (38 GB): × real time, lower is better"
-    x-axis ["baseline", "+4 threads", "+prefetch layer", "+prefetch next", "prefetch+threads", "batch 3", "batch 6"]
+    x-axis ["baseline", "threads", "prefetch", "next layer", "all", "batch 3", "batch 6"]
     y-axis "× real time" 0 --> 120
     bar [116.5, 78.2, 50.7, 47.8, 26.5, 17.7, 15.2]
 ```
+
+<sub>threads = 4 read threads · prefetch = within the layer · next layer = also the next layer ·
+all = both prefetches + 4 read threads · batch = that plus N takes in lockstep.</sub>
 
 ### 8 bits (Q8_0, 38 GB), GPU cache of 32 experts per layer
 

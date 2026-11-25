@@ -65,9 +65,9 @@ porque cada especialista era lido por uma falha de página de cada vez.
 
 ```mermaid
 flowchart LR
-    SSD["💾 SSD NVMe<br/>modelo inteiro<br/>38 / 68 GB"] -->|"pré-busca:<br/>um pedido grande<br/>por camada"| RAM["🧠 cache de arquivos<br/>(RAM que o sistema pode liberar)<br/>especialistas pré-lidos"]
-    RAM -->|"4 threads de cópia"| VRAM["🎮 cache de especialistas na GPU<br/>+ quentes fixos<br/>~10,5 GB"]
-    VRAM --> GPU["⚡ cálculo<br/>N tomadas em passo travado<br/>dividem cada leitura"]
+    SSD["💾 SSD NVMe<br/>modelo inteiro, 38/68 GB"] -->|pré-busca| RAM["🧠 cache de arquivos<br/>especialistas pré-lidos"]
+    RAM -->|4 threads| VRAM["🎮 cache na GPU<br/>quentes, ~10,5 GB"]
+    VRAM --> GPU["⚡ N tomadas<br/>dividem cada leitura"]
 ```
 
 ## O que funcionou
