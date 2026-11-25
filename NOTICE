@@ -1,0 +1,10 @@
+moe-offload-desktop
+Copyright 2026 moe-offload-desktop contributors
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+patches/audio.cpp-v0.9.6-moe-offload.patch modifies audio.cpp (https://github.com/0xShug0/audio.cpp),
+Copyright 2026 ShugoAI LLC, licensed under the Apache License, Version 2.0.
+
+Built with Fish Audio. The measurements use Fish Audio Drama 3, licensed under the Fish Audio Community
+License v1.0 (https://huggingface.co/fishaudio/drama-3). This repository does not contain or redistribute
+its weights or any generated audio.

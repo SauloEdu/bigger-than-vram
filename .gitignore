@@ -1,0 +1,12 @@
+# Never commit model weights, generated audio or measurement outputs.
+*.gguf
+*.safetensors
+*.bin
+*.wav
+*.mp3
+*.flac
+*.jsonl
+results/
+_upstream/
+__pycache__/
+.obsidian/

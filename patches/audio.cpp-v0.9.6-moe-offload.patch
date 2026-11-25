@@ -1,0 +1,645 @@
+MoE offload method for audio.cpp v0.9.6 (base commit 04a37f2e80ff2dbcdd84cc67848a970bd02a73e0, tag v0.9.6).
+
+This patch MODIFIES files of audio.cpp, Copyright 2026 ShugoAI LLC, licensed under the Apache License 2.0
+(https://www.apache.org/licenses/LICENSE-2.0). Changes: prefetch of disk experts within the layer and for the
+next layer (AUDIOCPP_MOE_PREFETCH), hot-expert map with VRAM pinning and RAM pre-read (AUDIOCPP_MOE_HOTMAP,
+AUDIOCPP_MOE_WARM_MB), per-expert usage statistics (AUDIOCPP_MOE_STATS) and lockstep batching of takes with
+per-take state kept in VRAM (fish_drama3 request option batch_takes). Apply with: git apply <this file>
+
+diff --git a/include/engine/community_models/fish_drama3/backbone.h b/include/engine/community_models/fish_drama3/backbone.h
+index 44c67c2..5e47ba6 100644
+--- a/include/engine/community_models/fish_drama3/backbone.h
++++ b/include/engine/community_models/fish_drama3/backbone.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include "engine/community_models/fish_drama3/state_snapshot.h"
+ #include "engine/framework/moe_engine/moe_engine.h"
+ 
+ #include "engine/framework/assets/tensor_source.h"
+@@ -86,6 +87,8 @@ public:
+             int64_t steps) = 0;
+         virtual std::vector<float> run_embedding_step(const std::vector<float> & embedding) = 0;
+         virtual int64_t valid_steps() const noexcept = 0;
++        // Device copy of the KV/recurrent state, to step several takes with one session.
++        virtual std::unique_ptr<StateSnapshot> snapshot() = 0;
+     };
+ 
+     std::unique_ptr<DecodeSession> create_decode_session(int64_t cache_steps);
+diff --git a/include/engine/community_models/fish_drama3/generator.h b/include/engine/community_models/fish_drama3/generator.h
+index 76fecbf..14daede 100644
+--- a/include/engine/community_models/fish_drama3/generator.h
++++ b/include/engine/community_models/fish_drama3/generator.h
+@@ -34,6 +34,10 @@ public:
+         const std::vector<Drama3Take> & history, const Drama3Sampling & sampling, bool streaming,
+         const std::function<void(const runtime::AudioBuffer &)> & on_audio = {}, bool continuation = false,
+         const std::vector<Drama3Take> & generated_history = {}, bool allow_empty = false);
++    // Offline takes with seeds seed..seed+takes-1, stepped together so each staged
++    // expert of a layer serves every take before the next layer evicts it.
++    std::vector<Drama3Generation> generate_takes(const std::string & text, const std::vector<Drama3Take> & references,
++        const std::vector<Drama3Take> & history, const Drama3Sampling & sampling, size_t takes);
+ 
+ private:
+     std::shared_ptr<const Drama3Assets> assets_;
+diff --git a/include/engine/community_models/fish_drama3/state_snapshot.h b/include/engine/community_models/fish_drama3/state_snapshot.h
+new file mode 100644
+index 0000000..2f0d86f
+--- /dev/null
++++ b/include/engine/community_models/fish_drama3/state_snapshot.h
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <ggml-alloc.h>
++#include <ggml-backend.h>
++#include <ggml.h>
++
++#include <cstdint>
++#include <memory>
++#include <stdexcept>
++#include <vector>
++
++namespace engine::models::fish_drama3 {
++
++// Device-side copy of a set of state tensors (KV caches, recurrent state), so several
++// takes can share one decode graph: load() before a take's step, save() after it.
++class StateSnapshot {
++public:
++    StateSnapshot(std::vector<ggml_tensor *> live, ggml_backend_t backend, int64_t * steps = nullptr)
++        : live_(std::move(live)), steps_(steps) {
++        context_.reset(ggml_init({(live_.size() + 1) * ggml_tensor_overhead(), nullptr, true}));
++        if (!context_) throw std::runtime_error("cannot allocate Drama 3 state snapshot context");
++        for (const auto * tensor : live_) mirror_.push_back(ggml_dup_tensor(context_.get(), tensor));
++        buffer_.reset(ggml_backend_alloc_ctx_tensors(context_.get(), backend));
++        if (!buffer_) throw std::runtime_error("cannot allocate Drama 3 state snapshot buffer");
++    }
++    void save() {
++        for (size_t i = 0; i < live_.size(); ++i) ggml_backend_tensor_copy(live_[i], mirror_[i]);
++        if (steps_) saved_steps_ = *steps_;
++    }
++    void load() {
++        for (size_t i = 0; i < live_.size(); ++i) ggml_backend_tensor_copy(mirror_[i], live_[i]);
++        if (steps_) *steps_ = saved_steps_;
++    }
++
++private:
++    struct ContextDeleter { void operator()(ggml_context * context) const { ggml_free(context); } };
++    struct BufferDeleter { void operator()(ggml_backend_buffer_t buffer) const { ggml_backend_buffer_free(buffer); } };
++    std::vector<ggml_tensor *> live_, mirror_;
++    int64_t * steps_;
++    int64_t saved_steps_ = 0;
++    std::unique_ptr<ggml_context, ContextDeleter> context_;
++    std::unique_ptr<ggml_backend_buffer, BufferDeleter> buffer_;
++};
++
++}  // namespace engine::models::fish_drama3
+diff --git a/include/engine/community_models/fish_drama3/tower.h b/include/engine/community_models/fish_drama3/tower.h
+index 58069f4..a707f56 100644
+--- a/include/engine/community_models/fish_drama3/tower.h
++++ b/include/engine/community_models/fish_drama3/tower.h
+@@ -10,6 +10,8 @@
+ #include <memory>
+ #include <vector>
+ 
++#include "engine/community_models/fish_drama3/state_snapshot.h"
++
+ namespace engine::models::fish_drama3 {
+ 
+ using Drama3Frame = std::array<int32_t, 11>;
+@@ -47,6 +49,7 @@ public:
+     Drama3Tower & operator=(const Drama3Tower &) = delete;
+ 
+     void reset();
++    std::unique_ptr<StateSnapshot> snapshot();
+     void release_prefill_graphs();
+     void mix_backbone_embeddings(std::vector<float> & embeddings,
+                                  const std::vector<Drama3Frame> & frames) const;
+diff --git a/model_specs/fish_drama3.json b/model_specs/fish_drama3.json
+index ed4aa7d..8cafe52 100644
+--- a/model_specs/fish_drama3.json
++++ b/model_specs/fish_drama3.json
+@@ -129,6 +129,15 @@
+         "description": "Reproducible native sampling seed.",
+         "required": false,
+         "min": 0
++      },
++      {
++        "name": "batch_takes",
++        "type": "int",
++        "description": "Offline takes with seeds seed..seed+N-1 stepped together, so each staged expert serves every take. Outputs take_01..take_NN.",
++        "required": false,
++        "default": 1,
++        "min": 1,
++        "max": 16
+       }
+     ],
+     "session": [
+diff --git a/src/community_models/fish_drama3/backbone.cpp b/src/community_models/fish_drama3/backbone.cpp
+index e98b910..90a34b8 100644
+--- a/src/community_models/fish_drama3/backbone.cpp
++++ b/src/community_models/fish_drama3/backbone.cpp
+@@ -1110,6 +1110,14 @@ public:
+         return valid_steps_;
+     }
+ 
++    // Batched takes share this graph; each keeps a device copy of the KV/recurrent state.
++    std::unique_ptr<StateSnapshot> snapshot() {
++        std::vector<ggml_tensor *> state;
++        for (const auto * group : {&full_key_caches_, &full_value_caches_, &linear_conv_tails_, &linear_recurrent_states_})
++            state.insert(state.end(), group->begin(), group->end());
++        return std::make_unique<StateSnapshot>(std::move(state), execution_.backend(), &valid_steps_);
++    }
++
+     int64_t cache_steps() const noexcept {
+         return cache_steps_;
+     }
+@@ -1460,6 +1468,8 @@ public:
+         return graph_.get().valid_steps();
+     }
+ 
++    std::unique_ptr<StateSnapshot> snapshot() override { return graph_.get().snapshot(); }
++
+ private:
+     std::reference_wrapper<Drama3BackboneCachedDecodeGraph> graph_;
+ };
+diff --git a/src/community_models/fish_drama3/generator.cpp b/src/community_models/fish_drama3/generator.cpp
+index 82efcc8..e5c0030 100644
+--- a/src/community_models/fish_drama3/generator.cpp
++++ b/src/community_models/fish_drama3/generator.cpp
+@@ -486,4 +486,123 @@ Drama3Generation Drama3Generator::generate(const std::string & text, const std::
+     return result;
+ }
+ 
++std::vector<Drama3Generation> Drama3Generator::generate_takes(const std::string & text,
++    const std::vector<Drama3Take> & references, const std::vector<Drama3Take> & history,
++    const Drama3Sampling & sampling, size_t takes) {
++    if (!std::isfinite(sampling.temperature) || sampling.temperature < 0 ||
++        !std::isfinite(sampling.top_p) || sampling.top_p <= 0 || sampling.top_p > 1 ||
++        sampling.top_k <= 0 || sampling.max_frames <= 0) throw runtime::InvalidRequestError("invalid Drama 3 sampling parameters");
++    if (takes < 1) throw runtime::InvalidRequestError("Drama 3 batch_takes must be positive");
++    const auto prompt = build_drama3_prompt(*assets_, tokenizer_, text, references, history, {},
++        static_cast<size_t>(cache_steps_ - 1));
++    const auto max_frames = std::min(sampling.max_frames, cache_steps_ - static_cast<int64_t>(prompt.size()));
++    cached_prefix_.clear();
++    cached_hidden_.clear();
++    // One decode session and one tower; each take keeps its own state snapshot,
++    // swapped in before its step. The shared prompt is prefilled only once.
++    struct Take {
++        std::vector<float> hidden;
++        Drama3Frame current;
++        std::mt19937 random;
++        std::deque<int32_t> recent;
++        std::vector<Drama3Frame> frames;
++        std::unique_ptr<StateSnapshot> backbone_state, tower_cache;
++        bool done = false, reached_limit = false;
++    };
++    auto & decoder = decoder_;
++    decoder->reset(disk_experts_);
++    tower_->reset();
++    std::vector<int32_t> ids;
++    for (const auto & frame : prompt) ids.push_back(frame[0]);
++    auto embeddings = backbone_->token_embedding(ids);
++    tower_->mix_backbone_embeddings(embeddings, prompt);
++    const auto prefill = decoder->prefill_embeddings(embeddings, static_cast<int64_t>(prompt.size()));
++    tower_->prefill(prefill.hidden, prompt);
++    std::vector<Take> state(takes);
++    for (size_t t = 0; t < takes; ++t) {
++        auto & take = state[t];
++        take.hidden = last_hidden(prefill.hidden, assets_->backbone.hidden_size);
++        take.current = prompt.back();
++        take.random.seed(sampling.seed + static_cast<uint32_t>(t));
++        if (takes > 1) {
++            take.backbone_state = decoder->snapshot();
++            take.tower_cache = tower_->snapshot();
++            take.backbone_state->save();
++            take.tower_cache->save();
++        }
++    }
++    SamplerScratch scratch;
++    const auto & config = assets_->tower;
++    for (int64_t step = 0; step < max_frames; ++step) {
++        bool active = false;
++        for (auto & take : state) {
++            if (take.done) continue;
++            if (takes > 1) {
++                take.backbone_state->load();
++                take.tower_cache->load();
++            }
++            auto candidates = backbone_->lm_head(take.hidden);
++            const int32_t first = sample(candidates, sampling.temperature, sampling.top_k, sampling.top_p, take.random, scratch);
++            const int32_t second = sample(candidates, 1.0F, 30, 0.95F, take.random, scratch);
++            const int32_t first_token = first == 0 ? assets_->eos : config.semantic_begin + first - 1;
++            const bool repeats = first != 0 && std::find(take.recent.begin(), take.recent.end(), first_token) != take.recent.end();
++            const int32_t selected = repeats ? second : first;
++            if (selected == 0) { take.done = true; continue; }
++            Drama3Frame next{};
++            next[0] = config.semantic_begin + selected - 1;
++            next[1] = selected - 1;
++            const int64_t position = decoder->valid_steps() - 1;
++            if (device_sampling_) {
++                std::array<float, 9> uniforms{};
++                if (sampling.temperature != 0 && sampling.top_k != 1)
++                    for (auto & uniform : uniforms) uniform = static_cast<float>(std::generate_canonical<double, 53>(take.random));
++                next = tower_->run_frame(take.hidden, take.current, selected - 1, position,
++                    sampling.temperature, sampling.top_k, sampling.top_p, uniforms);
++            } else {
++                const auto shared_input = tower_->shared_input({take.current});
++                auto tower_hidden = take.hidden;
++                for (int64_t layer = 0; layer < config.shared_layers + config.residual_layers; ++layer) {
++                    const int64_t book = layer < config.shared_layers ? 0 : layer - config.shared_layers;
++                    const auto output = tower_->run_layer(layer, tower_hidden, {next[1 + book]}, {1.0F},
++                        layer == 0 ? shared_input : std::vector<float>{}, position);
++                    tower_hidden = output.hidden;
++                    if (layer >= config.shared_layers)
++                        next[2 + book] = sample(output.logits, sampling.temperature, sampling.top_k, sampling.top_p, take.random, scratch);
++                }
++            }
++            if (takes > 1) take.tower_cache->save();
++            take.frames.push_back(next);
++            take.recent.push_back(next[0]);
++            if (take.recent.size() > 16) take.recent.pop_front();
++            if (step + 1 == max_frames) { take.reached_limit = true; take.done = true; continue; }
++            take.current = next;
++            auto embedding = backbone_->token_embedding({take.current[0]});
++            tower_->mix_backbone_embeddings(embedding, {take.current});
++            take.hidden = decoder->run_embedding_step(embedding);
++            if (takes > 1) take.backbone_state->save();
++            active = true;
++        }
++        if (!active) break;
++    }
++    if (disk_experts_) {
++        backbone_->release_prefill_graphs();
++        tower_->release_prefill_graphs();
++    }
++    std::vector<Drama3Generation> results(takes);
++    for (size_t t = 0; t < takes; ++t) {
++        const auto & frames = state[t].frames;
++        if (frames.empty()) throw std::runtime_error("Drama 3 take " + std::to_string(t + 1) + " ended before producing an audio frame");
++        auto & result = results[t];
++        result.reached_limit = state[t].reached_limit;
++        result.codes.codebooks = 10;
++        result.codes.frames = static_cast<int64_t>(frames.size());
++        result.codes.codes.resize(frames.size() * 10);
++        for (int64_t book = 0; book < 10; ++book)
++            for (size_t row = 0; row < frames.size(); ++row) result.codes.codes[book * frames.size() + row] = frames[row][book + 1];
++        result.audio = codec_->decode_codes(result.codes);
++        codec_->release_runtime_graphs();
++    }
++    return results;
++}
++
+ }  // namespace engine::models::fish_drama3
+diff --git a/src/community_models/fish_drama3/session.cpp b/src/community_models/fish_drama3/session.cpp
+index 5a5c17f..5f1a82d 100644
+--- a/src/community_models/fish_drama3/session.cpp
++++ b/src/community_models/fish_drama3/session.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include <algorithm>
+ #include <chrono>
++#include <cstdio>
+ #include <optional>
+ #include <stdexcept>
+ 
+@@ -207,6 +208,29 @@ runtime::TaskResult Drama3Session::synthesize(const runtime::TaskRequest & reque
+             append_take(descriptors);
+         }
+     }
++    const auto batch_takes = runtime::parse_positive_i64_option(effective.options, {"batch_takes"}, 1);
++    if (batch_takes > 1) {
++        const int64_t kMaxBatchTakes = 16;
++        if (streaming || batch_takes > kMaxBatchTakes)
++            throw runtime::InvalidRequestError("Drama 3 batch_takes requires offline mode and at most 16 takes");
++        const auto started = std::chrono::steady_clock::now();
++        auto generated = generator_->generate_takes(effective.text_input->text, references, history, sampling,
++            static_cast<size_t>(batch_takes));
++        runtime::TaskResult result;
++        result.audio_output = generated.front().audio;
++        for (size_t take = 0; take < generated.size(); ++take) {
++            runtime::NamedAudioBuffer named;
++            char id[16];
++            std::snprintf(id, sizeof(id), "take_%02zu", take + 1);
++            named.id = id;
++            named.audio = std::move(generated[take].audio);
++            named.meta.emplace("seed", std::to_string(sampling.seed + take));
++            result.named_audio_outputs.push_back(std::move(named));
++        }
++        engine::debug::timing_log_scalar("session.wall_ms",
++            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
++        return result;
++    }
+     const auto skip_empty = runtime::find_option(effective.options, {"skip_empty_chunks"});
+     const bool skip_empty_chunks = skip_empty && runtime::parse_bool_option(*skip_empty, "skip_empty_chunks");
+     const int64_t chunk_size = runtime::parse_positive_i64_option(effective.options, {"text_chunk_size"}, 128);
+diff --git a/src/community_models/fish_drama3/tower.cpp b/src/community_models/fish_drama3/tower.cpp
+index b1a3c5c..8e7223f 100644
+--- a/src/community_models/fish_drama3/tower.cpp
++++ b/src/community_models/fish_drama3/tower.cpp
+@@ -173,6 +173,13 @@ public:
+ 
+     void reset() { ggml_backend_buffer_clear(cache_buffer_, 0); }
+ 
++    // Batched takes share the weights; each keeps a device copy of the timeline cache.
++    std::unique_ptr<StateSnapshot> snapshot() {
++        std::vector<ggml_tensor *> state;
++        for (const auto & layer : layers_) { state.push_back(layer.key_cache); state.push_back(layer.value_cache); }
++        return std::make_unique<StateSnapshot>(std::move(state), execution_.backend());
++    }
++
+     void release_prefill_graphs() {
+         prefill_graphs_.clear();
+         prefill_cached_bytes_ = 0;
+@@ -554,6 +561,7 @@ Drama3Tower::Drama3Tower(std::shared_ptr<const assets::TensorSource> weights,
+     : impl_(std::make_unique<Impl>(std::move(weights), std::move(config), execution, cache_steps, prefill_cache_bytes)) {}
+ Drama3Tower::~Drama3Tower() = default;
+ void Drama3Tower::reset() { impl_->reset(); }
++std::unique_ptr<StateSnapshot> Drama3Tower::snapshot() { return impl_->snapshot(); }
+ void Drama3Tower::release_prefill_graphs() { impl_->release_prefill_graphs(); }
+ void Drama3Tower::mix_backbone_embeddings(std::vector<float> & embeddings, const std::vector<Drama3Frame> & frames) const {
+     impl_->mix_backbone_embeddings(embeddings, frames);
+diff --git a/src/framework/moe_engine/expert_storage.cpp b/src/framework/moe_engine/expert_storage.cpp
+index 5aa0b35..5ae5f52 100644
+--- a/src/framework/moe_engine/expert_storage.cpp
++++ b/src/framework/moe_engine/expert_storage.cpp
+@@ -20,11 +20,114 @@
+ #include <dispatch/dispatch.h>
+ #endif
+ 
++#include <condition_variable>
++#include <cstdlib>
++#include <deque>
++#include <mutex>
++#include <sstream>
++#include <thread>
++
++#if defined(_WIN32)
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#include <windows.h>
++#else
++#include <sys/mman.h>
++#endif
++
+ namespace engine::moe::detail {
+ using core::TensorValue;
+ using core::TensorShape;
+ using core::wrap_tensor;
+ 
++namespace {
++// Experimental offload tuning, read from environment variables so any MoE family
++// with disk experts gets it without new options:
++//   AUDIOCPP_MOE_STATS=<csv>     per (group, expert) requests and misses, written at exit
++//   AUDIOCPP_MOE_PREFETCH=0|1|2  1: one batched OS read-ahead for the misses of a layer
++//                                2: also read ahead the next group's previous experts in background
++//   AUDIOCPP_MOE_HOTMAP=<csv>    lines "group;expert;vram|ram": vram experts are never evicted
++//                                while another victim exists; ram experts are read into the OS
++//                                file cache in background (bounded by AUDIOCPP_MOE_WARM_MB)
++using Range = std::pair<const std::byte *, size_t>;
++
++void read_ahead(const std::vector<Range> & ranges) {
++    if (ranges.empty()) return;
++#if defined(_WIN32)
++    struct Entry { void * address; SIZE_T bytes; };
++    using Prefetch = BOOL(WINAPI *)(HANDLE, ULONG_PTR, Entry *, ULONG);
++    static const auto prefetch = reinterpret_cast<Prefetch>(
++        reinterpret_cast<void *>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "PrefetchVirtualMemory")));
++    if (!prefetch) return;
++    std::vector<Entry> entries;
++    entries.reserve(ranges.size());
++    for (const auto & range : ranges) entries.push_back({const_cast<std::byte *>(range.first), range.second});
++    prefetch(GetCurrentProcess(), entries.size(), entries.data(), 0);
++#else
++    const auto page = static_cast<uintptr_t>(4096);
++    for (const auto & range : ranges) {
++        const auto begin = reinterpret_cast<uintptr_t>(range.first) & ~(page - 1);
++        madvise(reinterpret_cast<void *>(begin), reinterpret_cast<uintptr_t>(range.first) + range.second - begin, MADV_WILLNEED);
++    }
++#endif
++}
++
++std::string env_text(const char * name) {
++    const char * value = std::getenv(name);
++    return value ? value : "";
++}
++
++// One background worker; stale predictions are dropped instead of queued.
++class ReadAheadWorker {
++public:
++    ~ReadAheadWorker() {
++        { std::lock_guard<std::mutex> lock(mutex_); stop_ = true; }
++        ready_.notify_all();
++        if (thread_.joinable()) thread_.join();
++    }
++    void post(std::vector<Range> ranges, bool droppable) {
++        if (ranges.empty()) return;
++        {
++            std::lock_guard<std::mutex> lock(mutex_);
++            if (!thread_.joinable()) thread_ = std::thread([this] { run(); });
++            if (droppable) {
++                const size_t kMaxQueuedPredictions = 2;
++                while (predictions_ >= kMaxQueuedPredictions) { jobs_.pop_front(); --predictions_; }
++                ++predictions_;
++                jobs_.push_back(std::move(ranges));
++            } else {
++                warm_.push_back(std::move(ranges));
++            }
++        }
++        ready_.notify_one();
++    }
++private:
++    void run() {
++        for (;;) {
++            std::vector<Range> job;
++            {
++                std::unique_lock<std::mutex> lock(mutex_);
++                ready_.wait(lock, [this] { return stop_ || !jobs_.empty() || !warm_.empty(); });
++                if (stop_) return;
++                if (!jobs_.empty()) { job = std::move(jobs_.front()); jobs_.pop_front(); --predictions_; }
++                else { job = std::move(warm_.front()); warm_.pop_front(); }
++            }
++            read_ahead(job);
++        }
++    }
++    std::mutex mutex_;
++    std::condition_variable ready_;
++    std::deque<std::vector<Range>> jobs_, warm_;
++    size_t predictions_ = 0;
++    bool stop_ = false;
++    std::thread thread_;
++};
++}  // namespace
++
+ class ExpertStorage::Impl {
+ public:
+     struct BufferDeleter { void operator()(ggml_backend_buffer_t buffer) const { ggml_backend_buffer_free(buffer); } };
+@@ -54,6 +157,9 @@ public:
+         std::unique_ptr<ggml_context, ContextDeleter> host_context;
+         std::vector<ggml_tensor *> host_tensors;
+         std::vector<std::unique_ptr<ggml_backend_buffer, BufferDeleter>> host_views;
++        std::vector<uint8_t> hot;                       // AUDIOCPP_MOE_HOTMAP vram tier
++        std::vector<int32_t> previous;                  // last requested experts, for read-ahead
++        std::vector<uint64_t> requests, miss_counts;    // AUDIOCPP_MOE_STATS
+         ~Group() {
+             host_views.clear();
+             if (buffer) ggml_backend_buffer_free(buffer);
+@@ -111,6 +217,79 @@ public:
+                 tensor->ne[2], offset, static_cast<size_t>(expert_bytes)}).second) throw std::runtime_error("duplicate expert bank: " + name);
+         }
+         mapped_file = io::read_binary_blob(path, true);
++        stats_path = env_text("AUDIOCPP_MOE_STATS");
++        const auto prefetch_text = env_text("AUDIOCPP_MOE_PREFETCH");
++        prefetch = prefetch_text.empty() ? 0 : std::stoi(prefetch_text);
++        if (prefetch < 0 || prefetch > 2) throw std::invalid_argument("AUDIOCPP_MOE_PREFETCH must be 0, 1 or 2");
++        const auto warm_text = env_text("AUDIOCPP_MOE_WARM_MB");
++        warm_bytes = warm_text.empty() ? 0 : std::stoull(warm_text) * 1024 * 1024;
++        if (const auto map = env_text("AUDIOCPP_MOE_HOTMAP"); !map.empty()) load_hot_map(map);
++    }
++
++    void load_hot_map(const std::string & path) {
++        std::ifstream input(path);
++        if (!input) throw std::runtime_error("cannot open AUDIOCPP_MOE_HOTMAP: " + path);
++        std::string line;
++        while (std::getline(input, line)) {
++            if (line.empty() || line[0] == '#') continue;
++            std::replace(line.begin(), line.end(), ';', ' ');
++            std::istringstream fields(line);
++            size_t group = 0;
++            int32_t expert = -1;
++            std::string tier;
++            if (!(fields >> group >> expert >> tier) || expert < 0 || (tier != "vram" && tier != "ram"))
++                throw std::runtime_error("invalid AUDIOCPP_MOE_HOTMAP line: " + line);
++            auto & tiers = tier == "vram" ? hot_vram : hot_ram;
++            if (tiers.size() <= group) tiers.resize(group + 1);
++            tiers[group].push_back(expert);
++        }
++    }
++
++    std::vector<Range> expert_ranges(const Group & group, const std::vector<int32_t> & ids) const {
++        std::vector<Range> ranges;
++        for (const auto & projection : group.projections)
++            for (const auto id : ids)
++                ranges.emplace_back(mapped_file.data() + projection.offset + static_cast<size_t>(id) * projection.expert_bytes,
++                    projection.expert_bytes);
++        return ranges;
++    }
++
++    // RAM tier: page the listed experts into the OS file cache once, within the budget.
++    // Clean file-backed pages are dropped under memory pressure instead of swapped.
++    void warm_ram_tier() {
++        warmed = true;
++        size_t budget = warm_bytes;
++        for (size_t g = 0; g < hot_ram.size() && g < groups.size(); ++g) {
++            std::vector<int32_t> ids;
++            for (const auto id : hot_ram[g]) {
++                if (static_cast<int64_t>(id) >= groups[g]->projections.front().experts) continue;
++                size_t bytes = 0;
++                for (const auto & projection : groups[g]->projections) bytes += projection.expert_bytes;
++                if (bytes > budget) break;
++                budget -= bytes;
++                ids.push_back(id);
++            }
++            worker.post(expert_ranges(*groups[g], ids), false);
++        }
++    }
++
++    // Predict the next group's experts from what it used last time (routing is
++    // temporally local) and read them ahead while this group computes.
++    void predict_next(size_t index) {
++        const auto & next = *groups[(index + 1) % groups.size()];
++        std::vector<int32_t> ids;
++        for (const auto id : next.previous)
++            if (std::find(next.expert_ids.begin(), next.expert_ids.end(), id) == next.expert_ids.end()) ids.push_back(id);
++        worker.post(expert_ranges(next, ids), true);
++    }
++
++    void write_stats() const {
++        if (stats_path.empty()) return;
++        std::ofstream output(stats_path);
++        output << "group;expert;requests;misses\n";
++        for (size_t g = 0; g < groups.size(); ++g)
++            for (size_t e = 0; e < groups[g]->requests.size(); ++e)
++                if (groups[g]->requests[e]) output << g << ';' << e << ';' << groups[g]->requests[e] << ';' << groups[g]->miss_counts[e] << '\n';
+     }
+ 
+     const std::vector<int32_t> & stage(const std::vector<int32_t> & ids, size_t index) {
+@@ -124,6 +303,7 @@ public:
+             if (!required[static_cast<size_t>(id)]) { required[static_cast<size_t>(id)] = 1; ++unique; }
+         }
+         if (unique > group.expert_ids.size()) throw std::runtime_error("routed experts exceed MoE cache capacity");
++        if (!warmed && !hot_ram.empty()) warm_ram_tier();
+         ++clock;
+         auto & misses = group.misses; misses.clear();
+         auto & planned_ids = group.planned_ids;
+@@ -140,9 +320,12 @@ public:
+                 ++stats.cache_hits;
+             } else {
+                 group.candidates.clear();
+-                for (size_t candidate = 0; candidate < planned_ids.size(); ++candidate)
+-                    if (planned_ids[candidate] < 0 || !required[static_cast<size_t>(planned_ids[candidate])])
+-                        group.candidates.push_back({candidate, planned_ids[candidate], group.last_used[candidate]});
++                for (int keep_hot = group.hot.empty() ? 0 : 1; keep_hot >= 0 && group.candidates.empty(); --keep_hot)
++                    for (size_t candidate = 0; candidate < planned_ids.size(); ++candidate)
++                        if ((planned_ids[candidate] < 0 || !required[static_cast<size_t>(planned_ids[candidate])]) &&
++                            !(keep_hot && planned_ids[candidate] >= 0 && group.hot[static_cast<size_t>(planned_ids[candidate])]))
++                            group.candidates.push_back({candidate, planned_ids[candidate], group.last_used[candidate]});
++                ++group.miss_counts[static_cast<size_t>(id)];
+                 slot = group.eviction->select({group.candidates, {index, cache_epoch, group.expert_ids}});
+                 if (std::none_of(group.candidates.begin(), group.candidates.end(),
+                     [slot](const auto & candidate) { return candidate.slot == slot; }))
+@@ -153,8 +336,16 @@ public:
+                 group.expert_ids[slot] = -1;
+             }
+             group.last_used[slot] = clock;
++            ++group.requests[static_cast<size_t>(id)];
+         }
+         std::sort(misses.begin(), misses.end(), [](const Miss & a, const Miss & b) { return a.slot < b.slot; });
++        if (!pin_experts && prefetch >= 1 && !misses.empty()) {
++            std::vector<int32_t> missed;
++            for (const auto & miss : misses) missed.push_back(miss.id);
++            read_ahead(expert_ranges(group, missed));
++        }
++        group.previous.assign(requested.begin(), requested.end());
++        if (!pin_experts && prefetch >= 2) predict_next(index);
+         auto * staging = pin_experts ? nullptr : host_staging.at(group.backend)->data();
+         if (!pin_experts && !misses.empty()) {
+             file.clear();
+@@ -247,6 +438,12 @@ public:
+     uint64_t clock = 0;
+     uint64_t cache_epoch = 0;
+     Statistics stats;
++    std::string stats_path;
++    int prefetch = 0;
++    size_t warm_bytes = 0;
++    bool warmed = false;
++    std::vector<std::vector<int32_t>> hot_vram, hot_ram;
++    ReadAheadWorker worker;  // last member: joined before the mapping is released
+ };
+ 
+ ExpertStorage::ExpertStorage(const std::filesystem::path & path, bool pin_experts, size_t read_threads,
+@@ -255,6 +452,7 @@ ExpertStorage::ExpertStorage(const std::filesystem::path & path, bool pin_expert
+     : impl_(std::make_unique<Impl>(path, pin_experts, read_threads, host_buffer_backend, std::move(eviction))) {}
+ 
+ ExpertStorage::~ExpertStorage() {
++    impl_->write_stats();
+     debug::timing_log_scalar("disk_experts.bytes_read", impl_->stats.bytes_read);
+     debug::timing_log_scalar("disk_experts.expert_loads", impl_->stats.expert_loads);
+     debug::timing_log_scalar("disk_experts.cache_hits", impl_->stats.cache_hits);
+@@ -296,6 +494,14 @@ size_t ExpertStorage::add_group(const std::vector<std::string> & names, ggml_bac
+     group->mapped_ids.reserve(static_cast<size_t>(slots));
+     group->misses.reserve(static_cast<size_t>(slots));
+     group->eviction = impl_->eviction_factory(static_cast<size_t>(group->projections.front().experts));
++    const auto experts = static_cast<size_t>(group->projections.front().experts);
++    group->requests.assign(experts, 0);
++    group->miss_counts.assign(experts, 0);
++    if (const auto order = impl_->groups.size(); order < impl_->hot_vram.size()) {
++        group->hot.assign(experts, 0);
++        for (const auto id : impl_->hot_vram[order])
++            if (static_cast<size_t>(id) < experts) group->hot[static_cast<size_t>(id)] = 1;
++    }
+     auto stats = impl_->stats;
+     std::unique_ptr<Impl::Staging> replacement_staging;
+     const auto staging = impl_->host_staging.find(backend);

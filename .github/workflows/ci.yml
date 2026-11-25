@@ -1,0 +1,41 @@
+# Reference workflow (CI runs locally for this owner; GitHub Actions is disabled).
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+      - name: Python syntax and unit tests
+        shell: pwsh
+        run: |
+          python -I -B -m py_compile scripts/run_measured.py scripts/hot_map.py
+          python -I -B -m unittest discover -s tests -v
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/scripts/run_series.ps1", [ref]$null, [ref]$errors)
+          if ($errors.Count) { $errors; exit 1 }
+      - name: Patch applies cleanly to audio.cpp v0.9.6
+        shell: pwsh
+        run: |
+          if (Test-Path _upstream) { Remove-Item -Recurse -Force _upstream }
+          git clone --quiet --depth 1 --branch v0.9.6 https://github.com/0xShug0/audio.cpp _upstream
+          if ($LASTEXITCODE) { exit 1 }
+          $sha = git -C _upstream rev-parse HEAD
+          if ($sha -ne '04a37f2e80ff2dbcdd84cc67848a970bd02a73e0') { "tag v0.9.6 moved: $sha"; exit 1 }
+          git -C _upstream apply --check "$PWD/patches/audio.cpp-v0.9.6-moe-offload.patch"
+          if ($LASTEXITCODE) { exit 1 }
+          Remove-Item -Recurse -Force _upstream
+      - name: No weights, audio or personal paths in the tree
+        shell: pwsh
+        run: |
+          $bad = git ls-files | Where-Object { $_ -match '\.(gguf|safetensors|wav|mp3|flac)$' }
+          if ($bad) { "weights or audio committed: $bad"; exit 1 }
+          $paths = git grep -n -I -E '[A-Za-z]:[\\/]+(Users|BEEXBE)[\\/]|/(Users|home)/[^/ ]+/' -- . ':!.github/workflows/ci.yml'
+          if ($LASTEXITCODE -eq 0) { "absolute user paths found:"; $paths; exit 1 }
+          if ($LASTEXITCODE -ne 1) { "git grep failed (exit $LASTEXITCODE)"; exit 1 }
+          exit 0
